@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 // Request is the versioned, host-independent native link protocol. Input paths
 // are explicit; Libraries are target ELF shared objects, never host libraries.

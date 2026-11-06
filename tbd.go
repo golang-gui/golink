@@ -14,14 +14,16 @@ type tbdGroup struct {
 type tbdDocument struct {
 	name               string
 	version4           bool
+	current, compat    uint32
 	targets            []string
 	exports, reexports []tbdGroup
 	children           []tbdGroup
 }
 type machoLibrary struct {
-	name      string
-	symbols   map[string]bool
-	reexports []string
+	name            string
+	symbols         map[string]bool
+	reexports       []string
+	current, compat uint32
 }
 
 // SDK TBD v4 uses mappings, scalar strings and flow sequences. Parse only that
@@ -43,7 +45,7 @@ func readTBD(path, target string) machoLibrary {
 		}
 		if strings.HasPrefix(line, "---") {
 			check(line == "--- !tapi-tbd", "unsupported TBD document %s", line)
-			doc = &tbdDocument{}
+			doc = &tbdDocument{current: 1 << 16, compat: 1 << 16}
 			docs = append(docs, doc)
 			mode = ""
 			group = nil
@@ -85,6 +87,14 @@ func readTBD(path, target string) machoLibrary {
 				doc.targets = tbdList(value)
 			case "install-name":
 				doc.name = tbdScalar(value)
+			case "current-version", "compatibility-version":
+				v, e := machoVersion(value)
+				check(e == nil, "invalid TBD library version: %v", e)
+				if key == "current-version" {
+					doc.current = v
+				} else {
+					doc.compat = v
+				}
 			case "exports", "reexports", "reexported-libraries":
 				check(value == "", "expected TBD group sequence")
 			case "flags":
@@ -116,7 +126,7 @@ func readTBD(path, target string) machoLibrary {
 		}
 	}
 	check(len(docs) > 0 && docs[0].name != "" && containsTarget(docs[0].targets, target), "TBD does not support %s: %s", target, path)
-	lib := machoLibrary{name: docs[0].name, symbols: map[string]bool{}}
+	lib := machoLibrary{name: docs[0].name, symbols: map[string]bool{}, current: docs[0].current, compat: docs[0].compat}
 	byName := map[string]*tbdDocument{}
 	for _, d := range docs {
 		check(d.version4 && d.name != "", "incomplete TBD document")

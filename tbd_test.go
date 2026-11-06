@@ -12,6 +12,8 @@ func TestTBDReexportsAndTargets(t *testing.T) {
 tbd-version: 4
 targets: [ arm64-ios-simulator ]
 install-name: '/Framework'
+current-version: 200.1.2
+compatibility-version: 3.4
 reexported-libraries:
   - targets: [ arm64-ios-simulator ]
     libraries: [ '/Private' ]
@@ -31,6 +33,9 @@ exports:
 		t.Fatal(err)
 	}
 	lib := readTBD(path, "arm64-ios-simulator")
+	if lib.current != 200<<16|1<<8|2 || lib.compat != 3<<16|4<<8 {
+		t.Fatal("丢失 TBD 库版本")
+	}
 	for _, n := range []string{"_puts", "quoted]symbol", "a'b", "_OBJC_CLASS_$_Example", "_OBJC_METACLASS_$_Example"} {
 		if !lib.symbols[n] {
 			t.Fatalf("没有导出 %s", n)

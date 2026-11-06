@@ -286,8 +286,8 @@ func (l *mLinker) emitMachO() []byte {
 	commands = append(commands, mWords(0x32, 24, platform, minimum, sdk, 0))
 	for _, lib := range l.libraries {
 		b := mStringCommand(0xc, lib.name, 24)
-		le.PutUint32(b[16:], 1<<16)
-		le.PutUint32(b[20:], 1<<16)
+		le.PutUint32(b[16:], lib.current)
+		le.PutUint32(b[20:], lib.compat)
 		commands = append(commands, b)
 	}
 	entry := l.r.Entry
