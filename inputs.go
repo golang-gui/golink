@@ -17,56 +17,63 @@ type member struct {
 	used bool
 }
 
+func readNativeArchive(p string) []*member {
+	var members []*member
+	b, err := os.ReadFile(p)
+	check(err == nil && bytes.HasPrefix(b, []byte("!<arch>\n")), "native archive %s", p)
+	var longNames []byte
+	pos := 8
+	for pos+60 <= len(b) {
+		h := b[pos : pos+60]
+		size, err := strconv.Atoi(strings.TrimSpace(string(h[48:58])))
+		check(err == nil && size >= 0 && size <= len(b)-pos-60 && string(h[58:60]) == "`\n", "archive member bounds")
+		data := b[pos+60 : pos+60+size]
+		name := strings.TrimSpace(string(h[:16]))
+		if strings.HasPrefix(name, "#1/") {
+			n, e := strconv.Atoi(name[3:])
+			check(e == nil && n >= 0 && n <= len(data), "BSD archive name")
+			name = string(data[:n])
+			data = data[n:]
+		}
+		pos += 60 + size + size%2
+		if name == "//" {
+			longNames = data
+			continue
+		}
+		if name == "/" || name == "/SYM64/" || strings.HasPrefix(name, "__.SYMDEF") {
+			continue
+		}
+		if strings.HasPrefix(name, "/") {
+			offset, err := strconv.Atoi(name[1:])
+			check(err == nil && offset >= 0 && offset < len(longNames), "GNU archive name")
+			end := bytes.IndexByte(longNames[offset:], '\n')
+			check(end >= 0, "unterminated GNU archive name")
+			name = strings.TrimSuffix(string(longNames[offset:offset+end]), "/")
+		}
+		members = append(members, &member{name: fmt.Sprintf("%s(%s)", p, name), data: data})
+	}
+	check(pos == len(b), "truncated native archive %s", p)
+	return members
+}
+
 func (l *linker) loadArchives(paths []string) {
 	var members []*member
 	for _, p := range paths {
-		b, err := os.ReadFile(p)
-		check(err == nil && bytes.HasPrefix(b, []byte("!<arch>\n")), "native archive %s", p)
-		var longNames []byte
-		pos := 8
-		for pos+60 <= len(b) {
-			h := b[pos : pos+60]
-			size, err := strconv.Atoi(strings.TrimSpace(string(h[48:58])))
-			check(err == nil && size >= 0 && size <= len(b)-pos-60 && string(h[58:60]) == "`\n", "archive member bounds")
-			data := b[pos+60 : pos+60+size]
-			name := strings.TrimSpace(string(h[:16]))
-			if strings.HasPrefix(name, "#1/") {
-				n, e := strconv.Atoi(name[3:])
-				check(e == nil && n >= 0 && n <= len(data), "BSD archive name")
-				name = string(data[:n])
-				data = data[n:]
-			}
-			pos += 60 + size + size%2
-			if name == "//" {
-				longNames = data
-				continue
-			}
-			if name == "/" || name == "/SYM64/" || strings.HasPrefix(name, "__.SYMDEF") {
-				continue
-			}
-			if strings.HasPrefix(name, "/") {
-				offset, err := strconv.Atoi(name[1:])
-				check(err == nil && offset >= 0 && offset < len(longNames), "GNU archive name")
-				end := bytes.IndexByte(longNames[offset:], '\n')
-				check(end >= 0, "unterminated GNU archive name")
-				name = strings.TrimSuffix(string(longNames[offset:offset+end]), "/")
-			}
-			check(bytes.HasPrefix(data, []byte("\x7fELF")), "unsupported native archive member %s(%s)", p, name)
-			f, e := elf.NewFile(bytes.NewReader(data))
-			check(e == nil, "archive ELF %s", name)
-			check(f.Type == elf.ET_REL && f.Machine == elf.EM_AARCH64, "unsupported archive object %s", name)
+		for _, m := range readNativeArchive(p) {
+			check(bytes.HasPrefix(m.data, []byte("\x7fELF")), "unsupported native archive member %s", m.name)
+			f, e := elf.NewFile(bytes.NewReader(m.data))
+			check(e == nil, "archive ELF %s", m.name)
+			check(f.Type == elf.ET_REL && f.Machine == elf.EM_AARCH64, "unsupported archive object %s", m.name)
 			syms, e := f.Symbols()
 			check(e == nil, "archive symbols")
-			m := &member{name: fmt.Sprintf("%s(%s)", p, name), data: data}
 			for _, s := range syms {
 				if s.Section != elf.SHN_UNDEF && elf.ST_BIND(s.Info) != elf.STB_LOCAL {
 					m.defs = append(m.defs, s.Name)
 				}
 			}
-			members = append(members, m)
 			f.Close()
+			members = append(members, m)
 		}
-		check(pos == len(b), "truncated native archive %s", p)
 	}
 	for {
 		changed := false
