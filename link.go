@@ -13,23 +13,34 @@ import (
 	"strings"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Request is the versioned, host-independent native link protocol. Input paths
 // are explicit; Libraries are target ELF shared objects, never host libraries.
-// Version 1 supports Android ARM64, eager binding and 16 KiB load alignment.
+// Format 1 supports Android ELF and iOS Mach-O ARM64. IOS selects device or
+// simulator metadata. Reexports supplies explicit supplemental TBD inputs.
 // Debug sections are omitted. Unsupported native features fail explicitly.
 type Request struct {
-	Format    int      `json:"format"`
-	Target    string   `json:"target"`
-	Output    string   `json:"output"`
-	Objects   []string `json:"objects"`
-	Archives  []string `json:"archives,omitempty"`
-	Libraries []string `json:"libraries,omitempty"`
-	SONAME    string   `json:"soname,omitempty"`
-	Entry     string   `json:"entry,omitempty"`
-	Symbolic  bool     `json:"symbolic,omitempty"`
-	NoDelete  bool     `json:"nodelete,omitempty"`
+	Format    int         `json:"format"`
+	Target    string      `json:"target"`
+	Output    string      `json:"output"`
+	Objects   []string    `json:"objects"`
+	Archives  []string    `json:"archives,omitempty"`
+	Libraries []string    `json:"libraries,omitempty"`
+	Reexports []string    `json:"reexports,omitempty"`
+	SONAME    string      `json:"soname,omitempty"`
+	Entry     string      `json:"entry,omitempty"`
+	Symbolic  bool        `json:"symbolic,omitempty"`
+	NoDelete  bool        `json:"nodelete,omitempty"`
+	IOS       *IOSOptions `json:"ios,omitempty"`
+}
+
+// IOSOptions selects the SDK platform metadata. Libraries are explicit TBD v4
+// files. Archives are consumed in full, matching Go's external-archive output.
+type IOSOptions struct {
+	Variant        string `json:"variant"`
+	MinimumVersion string `json:"minimum_version"`
+	SDKVersion     string `json:"sdk_version"`
 }
 
 type linkError struct{ error }
@@ -56,13 +67,31 @@ func ReadRequest(r io.Reader) (Request, error) {
 }
 
 func (r Request) validate() error {
-	if r.Format != 1 || r.Target != "android/arm64" {
+	if r.Format != 1 || (r.Target != "android/arm64" && r.Target != "ios/arm64") {
 		return fmt.Errorf("unsupported link format/target: %d %q", r.Format, r.Target)
 	}
-	if r.Output == "" || len(r.Objects) == 0 || len(r.Objects)+len(r.Archives)+len(r.Libraries) > 65536 {
+	if r.Target == "ios/arm64" {
+		if r.IOS == nil || (r.IOS.Variant != "device" && r.IOS.Variant != "simulator") || r.Symbolic || r.NoDelete || r.SONAME != "" {
+			return fmt.Errorf("invalid iOS link options")
+		}
+		minimum, err := machoVersion(r.IOS.MinimumVersion)
+		if err != nil {
+			return err
+		}
+		sdk, err := machoVersion(r.IOS.SDKVersion)
+		if err != nil {
+			return err
+		}
+		if minimum > sdk {
+			return fmt.Errorf("iOS minimum version exceeds SDK version")
+		}
+	} else if r.IOS != nil || len(r.Reexports) != 0 {
+		return fmt.Errorf("iOS options on Android request")
+	}
+	if r.Output == "" || len(r.Objects)+len(r.Archives) == 0 || len(r.Objects)+len(r.Archives)+len(r.Libraries)+len(r.Reexports) > 65536 {
 		return fmt.Errorf("link requires output and bounded object inputs")
 	}
-	for _, list := range [][]string{r.Objects, r.Archives, r.Libraries, {r.Output}} {
+	for _, list := range [][]string{r.Objects, r.Archives, r.Libraries, r.Reexports, {r.Output}} {
 		for _, name := range list {
 			if name == "" || strings.ContainsAny(name, "\x00\r\n") {
 				return fmt.Errorf("invalid link path %q", name)
@@ -91,22 +120,12 @@ func Link(r Request) (err error) {
 			}
 		}
 	}()
-	l := &linker{globals: map[string]*symbol{}, libSymbols: map[string]bool{}, entryName: r.Entry, soname: r.SONAME, symbolic: r.Symbolic, nodelete: r.NoDelete}
-	seen := map[string]bool{}
-	for _, path := range r.Libraries {
-		l.loadLibrary(path, seen)
+	var data []byte
+	if r.Target == "ios/arm64" {
+		data = linkMachO(r)
+	} else {
+		data = linkELF(r)
 	}
-	for _, path := range r.Objects {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		l.load(path, data)
-	}
-	l.loadArchives(r.Archives)
-	l.prepare()
-	l.finishTables()
-	data := l.emit()
 	temp, err := os.CreateTemp(filepath.Dir(r.Output), ".golink-*")
 	if err != nil {
 		return err
@@ -124,6 +143,23 @@ func Link(r Request) (err error) {
 		return err
 	}
 	return os.Rename(temp.Name(), r.Output)
+}
+
+func linkELF(r Request) []byte {
+	l := &linker{globals: map[string]*symbol{}, libSymbols: map[string]bool{}, entryName: r.Entry, soname: r.SONAME, symbolic: r.Symbolic, nodelete: r.NoDelete}
+	seen := map[string]bool{}
+	for _, path := range r.Libraries {
+		l.loadLibrary(path, seen)
+	}
+	for _, path := range r.Objects {
+		data, err := os.ReadFile(path)
+		check(err == nil, "read object %s: %v", path, err)
+		l.load(path, data)
+	}
+	l.loadArchives(r.Archives)
+	l.prepare()
+	l.finishTables()
+	return l.emit()
 }
 
 func (l *linker) loadLibrary(path string, seen map[string]bool) {
